@@ -1,10 +1,9 @@
-#include "./include/uapi/spell.h"
-
 #include <stdlib.h>
 #include <stdio.h>
 #include <ctype.h>
 
 #include <nd/nd.h>
+#include <nd/attr.h>
 #include <nd/equip.h>
 #include <nd/mortal.h>
 #include <nd/fight.h>
@@ -13,19 +12,35 @@
 #define HEAL_SKEL_REF 1
 #define SPELL_COST(dmg, y, no_bdmg) (no_bdmg ? 0 : dmg) + dmg / (1 << y)
 
-#define MSRA(ms, ra, G) G(ms) * (ra + 1) / RARE_MAX
-#define HS(sp) MSRA(sp->ms, sp->ra, SPELL_G)
-#define SPELL_G(v) G(v)
-#define SPELL_DMG(mortal, sp) SPELL_G((mortal)->attr[ATTR_INT]) + HS(sp)
-
 #define DEBUF_DURATION(ra) 20 * (RARE_MAX - ra) / RARE_MAX
 #define DEBUF_DMG(sp_dmg, duration) ((long) 2 * sp_dmg) / duration
 #define DEBUF_TYPE_MASK 0xf
 #define DEBUF_TYPE(sp) (sp->flags & DEBUF_TYPE_MASK)
 
-#define STAT_ELEMENT(fighter, caster, type) \
-	mask_element(caster, EFFECT(fighter, type).mask)
+typedef struct {
+	unsigned element;
+	unsigned char ms, ra, y, flags;
+} spell_skeleton_t;
 
+struct debuf {
+	unsigned skel;
+	unsigned duration;
+	long val;
+};
+
+struct spell {
+	unsigned skel;
+	unsigned cost; 
+	unsigned val;
+};
+
+typedef struct {
+	struct debuf debufs[8];
+	struct spell spells[8];
+	long mp;
+	unsigned char debuf_mask, combo;
+	unsigned char mov_mask, mdmg_mask, mdef_mask;
+} caster_t;
 
 enum legacy_spell_type {
 	SPELL_HEAL,
@@ -43,7 +58,6 @@ enum legacy_spell_type {
 };
 
 unsigned bcp_mp, type_spell, caster_hd;
-unsigned mortal_hd, fighter_hd, sitter_hd;
 unsigned omp;
 
 unsigned spell_new(char *name, unsigned element,
@@ -92,7 +106,7 @@ sp_color(spell_skeleton_t *_sp)
 }
 
 void
-debuf_notify(unsigned player_ref, struct debuf *d, short val)
+debuf_notify(unsigned player_ref, struct debuf *d, unsigned val)
 {
 	char buf[BUFSIZ];
 	SKEL skel;
@@ -108,54 +122,72 @@ debuf_notify(unsigned player_ref, struct debuf *d, short val)
 	notify_wts(player_ref, wts, wts_plural(wts), "%s", buf);
 }
 
+long effect(unsigned ref, enum affect slot) {
+	caster_t caster;
+	SKEL skel;
+	spell_skeleton_t *sspe = (spell_skeleton_t *) &skel.data;
+	long last;
+
+	sic_last(&last);
+	if (nd_get(caster_hd, &caster, &ref))
+		return last;
+
+	for (int i = 0; i < 8; i++) {
+		struct debuf *d = &caster.debufs[i];
+		if (d->skel == NOTHING)
+			continue;
+		nd_get(HD_SKEL, &skel, &d->skel);
+		if (DEBUF_TYPE(sspe) != slot)
+			continue;
+		last += d->val;
+	}
+
+	return last;
+}
+
 static inline int
-debuf_start(unsigned ent_ref, fighter_t *fighter, struct spell *sp, short val)
+debuf_start(unsigned ent_ref, struct spell *sp, unsigned val)
 {
 	SKEL skel;
-	caster_t caster;
+	caster_t caster_target;
+	unsigned target_ref = call_fighter_target(ent_ref);
 
 	nd_get(HD_SKEL, &skel, &sp->skel);
 	spell_skeleton_t *sspe = (spell_skeleton_t *) &skel.data;
-	nd_get(caster_hd, &caster, &ent_ref);
-	ENT eplayer = ent_get(ent_ref);
+	nd_get(caster_hd, &caster_target, &target_ref);
 	struct debuf *d;
 	int i;
 
-	if (caster.debuf_mask) {
-		i = __builtin_ffs(~caster.debuf_mask);
+	if (caster_target.debuf_mask) {
+		i = __builtin_ffs(~caster_target.debuf_mask);
 		if (!i)
 			return -1;
 		i--;
 	} else
 		i = 0;
 
-	d = &caster.debufs[i];
+	d = &caster_target.debufs[i];
 	d->skel = sp->skel;
 	d->duration = DEBUF_DURATION(sspe->ra);
 	d->val = DEBUF_DMG(val, d->duration);
 
 	i = 1 << i;
-	caster.debuf_mask |= i;
-
-	struct effect *e = &fighter->e[DEBUF_TYPE(sspe)];
-	e->mask |= i;
-	e->value += d->val;
+	caster_target.debuf_mask |= i;
 
 	debuf_notify(ent_ref, d, 0);
-	ent_set(ent_ref, &eplayer);
-	nd_put(caster_hd, &ent_ref, &caster);
+	nd_put(caster_hd, &ent_ref, &caster_target);
 
 	return 0;
 }
 
 static inline unsigned
-mask_element(caster_t caster, register unsigned char a)
+stat_element(caster_t *caster, register unsigned char mask)
 {
-	unsigned skel_id = caster.debufs[__builtin_ffs(a) - 1].skel;
+	unsigned skel_id = caster->debufs[__builtin_ffs(mask) - 1].skel;
 	SKEL skel;
 	nd_get(HD_SKEL, &skel, &skel_id);
 
-	if (!a)
+	if (!mask)
 		return ELM_PHYSICAL;
 
 	return ((spell_skeleton_t *) &skel.data)->element;
@@ -164,16 +196,12 @@ mask_element(caster_t caster, register unsigned char a)
 static inline int
 spell_cast(unsigned ent_ref, unsigned target_ref, unsigned slot)
 {
-	mortal_t mortal;
-	fighter_t fighter, target;
 	caster_t caster;
 	struct spell sp;
 	hit_t hit = { .ndmg = 0, };
 	SKEL skel;
-	ENT etarget = ent_get(target_ref);
 
 	nd_get(caster_hd, &caster, &ent_ref);
-	nd_get(fighter_hd, &fighter, &ent_ref);
 	sp = caster.spells[slot];
 
 	nd_get(HD_SKEL, &skel, &sp.skel);
@@ -181,7 +209,6 @@ spell_cast(unsigned ent_ref, unsigned target_ref, unsigned slot)
 
 	unsigned mana = caster.mp;
 	sic_str_t ss_a, ss_c;
-	char c[BUFSIZ + 32];
 
 	enum color color = sp_color(sspe);
 
@@ -194,11 +221,10 @@ spell_cast(unsigned ent_ref, unsigned target_ref, unsigned slot)
 	caster.mp = mana > 0 ? mana : 0;
 	nd_put(caster_hd, &ent_ref, &caster);
 
-	nd_get(fighter_hd, &target, &target_ref);
-
-	SIC_CALL(&hit.cdmg, fight_damage, sspe->element, sp.val,
-			EFFECT(&target, MDEF).value,
-			STAT_ELEMENT(&fighter, caster, MDEF));
+	hit.cdmg = call_fight_damage(
+			sspe->element, sp.val,
+			call_effect(target_ref, AF_MDEF),
+			stat_element(&caster, caster.mdef_mask));
 
 	element_t element;
 	nd_get(HD_ELEMENT, &element, &sspe->element);
@@ -211,106 +237,87 @@ spell_cast(unsigned ent_ref, unsigned target_ref, unsigned slot)
 
 	snprintf(ss_c.str, sizeof(ss_c.str), "cast %s on", ss_a.str);
 
-	int ret;
-	SIC_CALL(&ret, fighter_attack, ent_ref, ss_c, hit);
+	int ret = call_fighter_attack(ent_ref, ss_c, hit);
 
 	if (ret && random() < (RAND_MAX >> sspe->y))
-		debuf_start(target_ref, &target, &sp, hit.cdmg);
+		debuf_start(target_ref, &sp, hit.cdmg);
 
 	return 0;
 }
 
-int on_will_attack(unsigned ent_ref) {
-	fighter_t fighter, target;
+hit_t on_will_attack(unsigned ent_ref, double dt __attribute__((unused))) {
+	hit_t last, hit;
+	unsigned target_ref = call_fighter_target(ent_ref);
 	caster_t caster, target_caster;
 	element_t element;
 
-	nd_get(fighter_hd, &fighter, &ent_ref);
+	sic_last(&last);
 
-	if (!fighter.target)
-		return 0;
+	if (!target_ref)
+		return last;
 
 	// add spell features to the normal attack
 	// (like enchantments)
 
-	nd_get(fighter_hd, &target, &fighter.target);
-
 	nd_get(caster_hd, &caster, &ent_ref);
-	nd_get(caster_hd, &target_caster, &fighter.target);
+	nd_get(caster_hd, &target_caster, &target_ref);
 
-	unsigned at = STAT_ELEMENT(&fighter, caster, MDMG);
-	unsigned dt = STAT_ELEMENT(&target, target_caster, MDEF);
+	unsigned dmg_el = stat_element(&caster, caster.mdmg_mask);
+	unsigned def_el = stat_element(&target_caster, target_caster.mdef_mask);
 
-	SIC_CALL(&fighter.attack.ndmg, fight_damage, ELM_PHYSICAL, EFFECT(&fighter, DMG).value, EFFECT(&target, DEF).value + EFFECT(&target, MDEF).value, dt);
-	SIC_CALL(&fighter.attack.cdmg, fight_damage, at, EFFECT(&fighter, MDMG).value, EFFECT(&target, MDEF).value, dt);
-	fighter.attack.ndmg = -fighter.attack.ndmg;
-	fighter.attack.cdmg = -fighter.attack.cdmg;
+	long dmg = call_effect(ent_ref, AF_DMG),
+		 mdmg = call_effect(ent_ref, AF_MDMG),
+		 def = call_effect(target_ref, AF_DEF),
+		 mdef = call_effect(target_ref, AF_MDEF);
 
-	nd_get(HD_ELEMENT, &element, &at);
-	fighter.attack.color = element.color;
+	nd_get(HD_ELEMENT, &element, &dmg_el);
+
+	hit.ndmg = -call_fight_damage(ELM_PHYSICAL, dmg, def + mdef, def_el);;
+	hit.cdmg = -call_fight_damage(dmg_el, mdmg, mdef, def_el);
+	hit.color = element.color;
 
 	// now cast spells!
 
-	register unsigned char mask = EFFECT(&fighter, MOV).mask;
+	register unsigned char mask = caster.mov_mask;
 
 	if (mask) {
 		register unsigned i = __builtin_ffs(mask) - 1;
 		debuf_notify(ent_ref, &caster.debufs[i], 0);
-		return 0;
+		return hit;
 	}
 
 	// second part
 	register unsigned i, d, combo = caster.combo;
-	unsigned enough_mp = 1, cast = 0;
 
-	for (i = 0; enough_mp && (d = __builtin_ffs(combo)); combo >>= d) {
-		switch (spell_cast(ent_ref, fighter.target, i) - 1) {
-			case -1: enough_mp = 0;
-				 break;
-			case 1:
-				 return 0;
-			default:
-				 cast++;
+	for (i = 0; (d = __builtin_ffs(combo)); combo >>= d) {
+		if (spell_cast(ent_ref, target_ref, i)) {
+			nd_writef(ent_ref, "Not enough mana.\n");
+			break;
 		}
 	}
 
-	if (!enough_mp)
-		nd_writef(ent_ref, "Not enough mana.\n");
-	else if (cast) {
-		nd_get(fighter_hd, &fighter, &ent_ref);
-		fighter.flags &= ~FF_ATTACK;
-		nd_put(fighter_hd, &ent_ref, &fighter);
-	}
-
-	return 0;
+	return hit;
 }
 
 void
-debuf_end(fighter_t *fighter, caster_t *caster, unsigned i)
+debuf_end(caster_t *caster, unsigned i)
 {
 	struct debuf *d = &caster->debufs[i];
 	SKEL skel;
 	nd_get(HD_SKEL, &skel, &d->skel);
-	spell_skeleton_t *sspe = (spell_skeleton_t *) &skel.data;
-	struct effect *e = &fighter->e[DEBUF_TYPE(sspe)];
-	i = 1 << i;
-
-	caster->debuf_mask ^= i;
-	e->mask ^= i;
-	e->value -= d->val;
+	caster->debuf_mask ^= 1 << i;
+	// TODO make debug mask the true source of debuf activation
 }
 
 int
 debufs_process(unsigned ent_ref)
 {
 	caster_t caster;
-	fighter_t fighter;
 	register unsigned mask, i, aux;
-	short hpi = 0, dmg;
+	long hpi = 0;
 	struct debuf *d, *hd;
 
 	nd_get(caster_hd, &caster, &ent_ref);
-	nd_get(fighter_hd, &fighter, &ent_ref);
 
 	for (mask = caster.debuf_mask, i = 0;
 	     (aux = __builtin_ffs(mask));
@@ -318,9 +325,11 @@ debufs_process(unsigned ent_ref)
 	{
 		i += aux - 1;
 		d = &caster.debufs[i];
+		if (d->skel == NOTHING)
+			continue;
 		d->duration--;
 		if (d->duration <= 0) {
-			debuf_end(&fighter, &caster, i);
+			debuf_end(&caster, i);
 			continue;
 		}
 		SKEL skel;
@@ -328,64 +337,53 @@ debufs_process(unsigned ent_ref)
 		spell_skeleton_t *sspe = (spell_skeleton_t *) &skel.data;
 		// wtf is this special code?
 		if (DEBUF_TYPE(sspe) == AF_HP) {
-			SIC_CALL(&dmg, fight_damage, sspe->element, d->val,
-				      EFFECT(&fighter, MDEF).value,
-				      STAT_ELEMENT(&fighter, caster, MDEF));
-
 			hd = d;
 
-			hpi += dmg;
+			hpi += call_fight_damage(sspe->element, d->val,
+					call_effect(ent_ref, AF_MDEF),
+					stat_element(&caster, caster.mdef_mask));
 		}
 	}
 
 	nd_get(caster_hd, &ent_ref, &caster);
 
-	if (hpi) {
-		debuf_notify(ent_ref, hd, hpi);
-		return hpi;
-	}
+	if (!hpi)
+		return 0;
 
-	return 0;
+	debuf_notify(ent_ref, hd, hpi);
+	return hpi;
 }
 
 void mcp_mp(unsigned ent_ref) {
-	fighter_t fighter;
 	caster_t caster;
 
 	nd_get(caster_hd, &caster, &ent_ref);
-	nd_get(fighter_hd, &fighter, &ent_ref);
 
-	mcp_bar(bcp_mp, ent_ref, caster.mp, MP_MAX(&fighter));
+	mcp_bar(bcp_mp, ent_ref, caster.mp, call_mp_max(ent_ref));
 }
 
-int on_mortal_survival(unsigned ent_ref, double dt) {
-	fighter_t fighter;
+int on_mortal_survival(unsigned ent_ref, double dt __attribute__((unused))) {
 	caster_t caster;
-	mortal_t mortal;
-	sitter_t sitter;
-	ENT ent = ent_get(ent_ref);
 
 	nd_get(caster_hd, &caster, &ent_ref);
-	nd_get(fighter_hd, &fighter, &ent_ref);
-	nd_get(mortal_hd, &mortal, &ent_ref);
-	nd_get(sitter_hd, &sitter, &ent_ref);
 
-	int damage;
+	long damage = 0;
 
 	omp = caster.mp;
-	if (sitter != STANDING) {
+	if (call_sitting(ent_ref)) {
 		int div = 100;
-		int max, cur;
-		damage += dt * HP_MAX(&fighter) / div;
-		max = MP_MAX(&mortal);
-		cur = caster.mp + (max / div);
-		caster.mp = cur > max ? max : cur;
+		long cur;
+		long mp_max = call_mp_max(ent_ref);
+		damage += dt * call_hp_max(ent_ref) / div;
+		cur = caster.mp + (mp_max / div);
+		caster.mp = cur > mp_max ? mp_max : cur;
 	}
 
 	nd_put(caster_hd, &ent_ref, &caster);
 	damage += debufs_process(ent_ref);
 
-	SIC_CALL(NULL, mortal_damage, NOTHING, ent_ref, damage);
+	if (damage)
+		call_mortal_damage(NOTHING, ent_ref, damage);
 
 	if (caster.mp != omp)
 		mcp_mp(ent_ref);
@@ -393,16 +391,17 @@ int on_mortal_survival(unsigned ent_ref, double dt) {
 	return 0;
 }
 
-int on_birth(unsigned ref, uint64_t v) {
+int on_add(unsigned ref, unsigned type, uint64_t v __attribute__((unused))) {
 	register int j;
 	caster_t caster;
-	fighter_t fighter;
-	mortal_t mortal;
 	memset(&caster, 0, sizeof(caster));
 
-	nd_get(fighter_hd, &fighter, &ref);
-	nd_get(mortal_hd, &mortal, &ref);
-	caster.mp = MP_MAX(&fighter);
+	if (type != TYPE_ENTITY)
+		return 1;
+
+	caster.mp = call_mp_max(ref);
+
+	long mdmg = call_effect(ref, AF_MDMG);
 
 	for (j = 0; j < 8; j++) {
 		struct spell *sp = &caster.spells[j];
@@ -410,8 +409,9 @@ int on_birth(unsigned ref, uint64_t v) {
 		unsigned ref = HEAL_SKEL_REF;
 		nd_get(HD_SKEL, &skel, &ref);
 		spell_skeleton_t *sspe = (spell_skeleton_t *) &skel.data;
-		sp->val = SPELL_DMG(&mortal, sspe);
+		sp->val = mdmg + G(sspe->ms) * (sspe->ra + 1) / RARE_MAX;
 		sp->cost = SPELL_COST(sp->val, sspe->y, sspe->flags & AF_BUF);
+		caster.debufs[j].skel = NOTHING;
 	}
 
 	nd_put(caster_hd, &ref, &caster);
@@ -420,7 +420,7 @@ int on_birth(unsigned ref, uint64_t v) {
 
 
 void
-debufs_end(fighter_t *fighter, caster_t *caster)
+debufs_end(caster_t *caster)
 {
 	register unsigned mask, i, aux;
 
@@ -428,26 +428,22 @@ debufs_end(fighter_t *fighter, caster_t *caster)
 	     (aux = __builtin_ffs(mask));
 	     i++, mask >>= aux)
 
-		 debuf_end(fighter, caster, i += aux - 1);
+		 debuf_end(caster, i += aux - 1);
 }
-
 
 int on_death(unsigned ent_ref) {
 	caster_t caster;
-	fighter_t fighter;
 
 	nd_get(caster_hd, &caster, &ent_ref);
-	nd_get(fighter_hd, &fighter, &ent_ref);
 
 	caster.mp = 1;
-	debufs_end(&fighter, &caster);
+	debufs_end(&caster);
 
 	nd_put(caster_hd, &ent_ref, &caster);
-	nd_put(fighter_hd, &ent_ref, &fighter);
 	return 0;
 }
 
-int on_mortal_life(unsigned ent_ref, double dt) {
+int on_mortal_life(unsigned ent_ref, double dt __attribute__((unused))) {
 	caster_t caster;
 	nd_get(caster_hd, &caster, &ent_ref);
 	omp = caster.mp;
@@ -456,16 +452,25 @@ int on_mortal_life(unsigned ent_ref, double dt) {
 
 int on_status(unsigned ent_ref) {
 	caster_t caster;
-	fighter_t fighter;
 
 	nd_get(caster_hd, &caster, &ent_ref);
-	nd_get(fighter_hd, &fighter, &ent_ref);
 
-	nd_writef(ent_ref, "mp %u/%u\t"
-		"combo 0x%x \tdebuf_mask 0x%x\n",
-		caster.mp, MP_MAX(&fighter),
+	nd_writef(ent_ref, "Spell\tmp %5u, mmp %4u, com %4x, dem %4x\n",
+		caster.mp, call_mp_max(ent_ref),
 		caster.combo, caster.debuf_mask);
 
+	return 0;
+}
+
+int heal(unsigned ref) {
+	caster_t caster;
+	nd_get(caster_hd, &caster, &ref);
+
+	debufs_end(&caster);
+	caster.mp = call_mp_max(ref);
+
+	nd_put(caster_hd, &ref, &caster);
+	mcp_mp(ref);
 	return 0;
 }
 
@@ -475,8 +480,6 @@ do_heal(int fd, int argc __attribute__((unused)), char *argv[])
 	char *name = argv[1];
 	unsigned player_ref = fd_player(fd), target_ref;
 	caster_t caster_target;
-	mortal_t mortal_target;
-	fighter_t fighter_target;
 
 	if (strcmp(name, "me")) {
 		target_ref = ematch_near(player_ref, name);
@@ -489,26 +492,12 @@ do_heal(int fd, int argc __attribute__((unused)), char *argv[])
 	}
 
 	nd_get(caster_hd, &caster_target, &player_ref);
-	nd_get(mortal_hd, &mortal_target, &target_ref);
-	nd_get(fighter_hd, &fighter_target, &target_ref);
-
-	debufs_end(&fighter_target, &caster_target);
-	mortal_target.hp = HP_MAX(&mortal_target);
-	caster_target.mp = MP_MAX(&fighter_target);
-	mortal_target.huth[HUTH_THIRST]
-		= mortal_target.huth[HUTH_HUNGER] = 0;
-
-	nd_put(caster_hd, &target_ref, &caster_target);
-	nd_put(mortal_hd, &target_ref, &mortal_target);
-
-	SIC_CALL(NULL, mcp_hp, target_ref);
-	mcp_mp(target_ref);
-
+	heal(target_ref);
 	notify_wts_to(player_ref, target_ref, "heal", "heals", "");
 }
 
-int on_vim(unsigned ent_ref, sic_str_t ss, int ofs) {
-	char *opcs = ss.str + ofs;
+sic_str_t on_vim(unsigned ent_ref, sic_str_t ss) {
+	char *opcs = ss.str + ss.pos;
 	char *end;
 	if (isdigit(*opcs)) {
 		caster_t caster;
@@ -517,21 +506,20 @@ int on_vim(unsigned ent_ref, sic_str_t ss, int ofs) {
 		caster.combo = combo;
 		nd_put(caster_hd, &ent_ref, &caster);
 		nd_writef(ent_ref, "Set combo to 0x%x.\n", combo);
-		return (end - opcs);
+		ss.pos += end - opcs;
+		return ss;
 	} else if (*opcs == 'c' && isdigit(opcs[1])) {
 		unsigned slot = strtol(opcs + 1, &end, 0);
 		OBJ player;
 		nd_get(HD_OBJ, &player, &ent_ref);
 		if (player.location == 0)
 			nd_writef(ent_ref, "You may not cast spells in room 0.\n");
-		else {
-			fighter_t fighter;
-			nd_get(fighter_hd, &fighter, &ent_ref);
-			spell_cast(ent_ref, fighter.target, slot);
-		}
-		return (end - opcs);
+		else
+			spell_cast(ent_ref, call_fighter_target(ent_ref), slot);
+		ss.pos += end - opcs;
+		return ss;
 	} else
-		return 0;
+		return ss;
 }
 
 void
@@ -542,9 +530,6 @@ mod_open(void *arg __attribute__((unused))) {
 	type_spell = nd_put(HD_TYPE, NULL, "spell");
 
 	bcp_mp = nd_put(HD_BCP, NULL, "mp");
-	nd_get(HD_HD, "fighter", &fighter_hd);
-	nd_get(HD_HD, "mortal", &mortal_hd);
-	nd_get(HD_HD, "sitter", &sitter_hd);
 
 	nd_register("heal", do_heal, 0);
 }
