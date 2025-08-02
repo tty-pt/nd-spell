@@ -3,6 +3,7 @@
 #include <ctype.h>
 
 #include <nd/nd.h>
+#include <nd/verb.h>
 #include <nd/attr.h>
 #include <nd/equip.h>
 #include <nd/mortal.h>
@@ -59,6 +60,7 @@ enum legacy_spell_type {
 
 unsigned bcp_mp, type_spell, caster_hd;
 unsigned omp;
+unsigned wt_heal;
 
 unsigned spell_new(char *name, unsigned element,
 		unsigned char ms, unsigned char ra,
@@ -79,18 +81,16 @@ unsigned spell_new(char *name, unsigned element,
 	return nd_put(HD_SKEL, NULL, &skel);
 }
 
-static inline char*
+static inline unsigned
 debuf_wts(spell_skeleton_t *_sp)
 {
-	static char ret[BUFSIZ];
 	register unsigned char mask = _sp->flags;
 	register unsigned idx = (DEBUF_TYPE(_sp) << 1) + ((mask >> 4) & 1);
 	unsigned wts_ref;
 	extern unsigned awts_hd, wts_hd;
 	unsigned ref = (_sp->element << 4) | idx;
 	nd_get(HD_RWTS, &wts_ref, &ref);
-	nd_get(HD_WTS, ret, &wts_ref);
-	return ret;
+	return wts_ref;
 }
 
 static inline enum color
@@ -112,14 +112,14 @@ debuf_notify(unsigned player_ref, struct debuf *d, unsigned val)
 	SKEL skel;
 	nd_get(HD_SKEL, &skel, &d->skel);
 	spell_skeleton_t *sspe = (spell_skeleton_t *) &skel.data;
-	char *wts = debuf_wts(sspe);
+	unsigned wt_debuf = debuf_wts(sspe);
 
 	if (val)
 		snprintf(buf, sizeof(buf), " (%s%d%s)", ansi_fg[sp_color(sspe)], val, ANSI_RESET);
 	else
 		*buf = '\0';
 
-	notify_wts(player_ref, wts, wts_plural(wts), "%s", buf);
+	call_verb(player_ref, wt_debuf, buf);
 }
 
 long effect(unsigned ref, enum affect slot) {
@@ -493,7 +493,8 @@ do_heal(int fd, int argc __attribute__((unused)), char *argv[])
 
 	nd_get(caster_hd, &caster_target, &player_ref);
 	heal(target_ref);
-	notify_wts_to(player_ref, target_ref, "heal", "heals", "");
+
+	call_verb_to(player_ref, target_ref, wt_heal, "");
 }
 
 sic_str_t on_vim(unsigned ent_ref, sic_str_t ss) {
@@ -532,10 +533,13 @@ mod_open(void *arg __attribute__((unused))) {
 	bcp_mp = nd_put(HD_BCP, NULL, "mp");
 
 	nd_register("heal", do_heal, 0);
+	nd_get(HD_RWTS, &wt_heal, "hit");
 }
 
 void
 mod_install(void *arg __attribute__((unused))) {
+	nd_put(HD_WTS, NULL, "heal");
+
 	mod_open(arg);
 
 	spell_new("Heal", ELM_PHYSICAL, 3, 1, 2, AF_HP);
