@@ -237,7 +237,9 @@ spell_cast(unsigned ent_ref, unsigned target_ref, unsigned slot)
 
 	snprintf(ss_c.str, sizeof(ss_c.str), "cast %s on", ss_a.str);
 
-	int ret = call_fighter_attack(ent_ref, ss_c, hit);
+	// FIXME
+	/* int ret = call_fighter_attack(ent_ref, ss_c, hit); */
+	int ret = call_fighter_attack(ent_ref, hit);
 
 	if (ret && random() < (RAND_MAX >> sspe->y))
 		debuf_start(target_ref, &sp, hit.cdmg);
@@ -497,7 +499,7 @@ do_heal(int fd, int argc __attribute__((unused)), char *argv[])
 	call_verb_to(player_ref, target_ref, wt_heal, "");
 }
 
-sic_str_t on_vim(unsigned ent_ref, sic_str_t ss) {
+int on_vim(unsigned ent_ref, sic_str_t ss) {
 	char *opcs = ss.str + ss.pos;
 	char *end;
 	if (isdigit(*opcs)) {
@@ -507,8 +509,7 @@ sic_str_t on_vim(unsigned ent_ref, sic_str_t ss) {
 		caster.combo = combo;
 		nd_put(caster_hd, &ent_ref, &caster);
 		nd_writef(ent_ref, "Set combo to 0x%x.\n", combo);
-		ss.pos += end - opcs;
-		return ss;
+		return end - opcs;
 	} else if (*opcs == 'c' && isdigit(opcs[1])) {
 		unsigned slot = strtol(opcs + 1, &end, 0);
 		OBJ player;
@@ -517,10 +518,9 @@ sic_str_t on_vim(unsigned ent_ref, sic_str_t ss) {
 			nd_writef(ent_ref, "You may not cast spells in room 0.\n");
 		else
 			spell_cast(ent_ref, call_fighter_target(ent_ref), slot);
-		ss.pos += end - opcs;
-		return ss;
+		return end - opcs;
 	} else
-		return ss;
+		return 0;
 }
 
 void
