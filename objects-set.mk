@@ -1,0 +1,1 @@
+CFLAGS-libnd-spell-o := -fPIC
