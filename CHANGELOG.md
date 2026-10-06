@@ -1,4 +1,24 @@
-## 1.0.0
+## 1.0.7
+
+- **`do_heal`'s dead `EF_WIZARD` gate is gone, with the behaviour it already
+  had.** Nothing ever set `EF_WIZARD` — the flag was deleted with the wizard
+  concept (ST.md §27.6(1), NO_WIZ.md) — so the condition was already
+  unconditionally taken and every `heal` was already refused; the refusal is
+  now stated explicitly instead of being read off a flag nobody sets.
+  `on_will_attack` also zero-initializes `hit_t last`, `hit` and
+  `element_t element`, which were declared without an initializer.
+- **The sibling `-I` lines are gone.** `CFLAGS += -I$(shell cd .. && pwd)/…`
+  pointed at the axil-nd/nd sibling checkouts and only existed for a dev
+  build: in CI those directories do not exist and every header comes from the
+  installed packages named in `.github/workflows/ci.yml`. The build now
+  resolves `<nd/…>` the way a packager sees it.
+- **macOS: link with `-undefined dynamic_lookup`.** macOS `ld` rejects
+  undefined symbols in a shared library, but `WARN` needs `qsyslog` — an
+  engine-provided function pointer resolved at `dlopen` time (Linux allows
+  this by default). `-undefined dynamic_lookup` is the Darwin equivalent, set
+  as `LDFLAGS-libnd-spell-Darwin` so no other platform is affected.
+
+## [1.0.0]
 
 - **nd-spell is now an installable library rather than a build artifact of
   the engine.** It builds and installs exactly one file,
