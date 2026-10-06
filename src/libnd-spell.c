@@ -349,10 +349,10 @@ spell_cast(unsigned ent_ref, unsigned target_ref, unsigned slot)
  * target we pass it through unchanged. */
 XY_IMPL(hit_t, on_will_attack, unsigned, ent_ref, double, dt)
 {
-	hit_t last, hit;
+	hit_t last = { 0 }, hit = { 0 };
 	unsigned target_ref = fighter_target(ent_ref);
 	caster_t caster, target_caster;
-	element_t element;
+	element_t element = { 0 };
 
 	(void) dt;
 	nd_last(&last);
@@ -599,10 +599,13 @@ do_heal(int fd, int argc __attribute__((unused)), char *argv[])
 	} else
 		target_ref = player_ref;
 
-	if (target_ref == NOTHING || !(ent_get(player_ref).flags & EF_WIZARD)) {
-                nd_printf(player_ref, "You can't do that.\n");
-		return;
-	}
+	/* EF_WIZARD was deleted (ST.md §27.6(1), NO_WIZ.md). Nothing ever set
+	 * it, so this gate was already unconditionally taken. */
+	(void)name;
+	(void)target_ref;
+	(void)caster_target;
+	nd_printf(player_ref, "You can't do that.\n");
+	return;
 
 	nd_get(caster_hd, &caster_target, &player_ref);
 	heal(target_ref);
