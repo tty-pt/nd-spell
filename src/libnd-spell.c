@@ -49,13 +49,8 @@
 #include <ctype.h>
 #include <string.h>
 
-#define ATTR_IMPL
-#include <nd/attr.h>
-#define FIGHT_IMPL
-#include <nd/fight.h>
-#define MORTAL_IMPL
-#include <nd/mortal.h>
-
+#include <nd/attr-types.h>
+#include <nd/fight-types.h>
 #include <nd/equip.h>
 #include <nd/seat.h>
 
