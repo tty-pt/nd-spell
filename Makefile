@@ -9,4 +9,6 @@ FOLDER := nd
 # qsyslog: an engine-provided function pointer resolved at dlopen (Linux
 # allows this by default). dynamic_lookup is the Darwin equivalent.
 LDFLAGS-libnd-spell-Darwin += -undefined dynamic_lookup
+add-prefix-glob := ../nd-* ../axil-nd
+
 -include ./../mk/include.mk
