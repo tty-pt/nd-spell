@@ -51,6 +51,7 @@
 
 #include <nd/attr-types.h>
 #include <nd/fight-types.h>
+#include <nd/spell-types.h>
 #include <nd/equip.h>
 #include <nd/seat.h>
 
@@ -76,41 +77,6 @@ typedef struct {
 	unsigned element;
 	unsigned char ms, ra, y, flags;
 } spell_skeleton_t;
-
-struct debuf {
-	unsigned skel;
-	unsigned duration;
-	long val;
-};
-
-struct spell {
-	unsigned skel;
-	unsigned cost; 
-	unsigned val;
-};
-
-typedef struct {
-	struct debuf debufs[8];
-	struct spell spells[8];
-	long mp;
-	unsigned char debuf_mask, combo;
-	unsigned char mov_mask, mdmg_mask, mdef_mask;
-} caster_t;
-
-enum legacy_spell_type {
-	SPELL_HEAL,
-	SPELL_FOCUS,
-	SPELL_FIRE_FOCUS,
-	SPELL_CUT,
-	SPELL_FIREBALL,
-	SPELL_WEAKEN,
-	SPELL_DISTRACT,
-	SPELL_FREEZE,
-	SPELL_LAVA_SHIELD,
-	SPELL_WIND_VEIL,
-	SPELL_STONE_SKIN,
-	SPELL_MAX,
-};
 
 static unsigned bcp_mp, type_spell, caster_hd;
 static unsigned omp;
