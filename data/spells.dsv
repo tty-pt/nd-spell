@@ -1,0 +1,14 @@
+# name|element|ms|ra|y|flags
+# element: spirit|fire|water|air|earth|physical
+# flags:   '+'-joined affect names: hp mov mdmg mdef dodge dmg def, neg buf
+Heal|physical|3|1|2|hp
+Focus|physical|15|3|1|mdmg+buf
+Fire Focus|fire|15|3|1|mdmg+buf
+Cut|physical|15|1|2|neg
+Fireball|fire|3|1|2|neg
+Weaken|physical|15|3|1|mdmg+buf+neg
+Distract|physical|15|3|1|mdef+buf+neg
+Freeze|water|10|2|4|mov+neg
+Lava Shield|fire|15|3|1|mdef+buf
+Wind Veil|air|0|0|0|dodge
+Stone Skin|earth|0|0|0|def

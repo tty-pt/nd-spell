@@ -66,6 +66,10 @@ XY_DECL(long, fight_damage, unsigned, dmg_type, long, dmg, long, def, unsigned, 
 XY_DECL(int, fighter_attack, unsigned, player_ref, hit_t, hit);
 
 #define HEAL_SKEL_REF 1
+
+static unsigned spell_loaded; /* rows consumed from spells.dsv */
+static unsigned spell_skel_ref[64]; /* skeleton ref of each loaded row */
+static void caster_ensure(unsigned ref);
 #define SPELL_COST(dmg, y, no_bdmg) (no_bdmg ? 0 : dmg) + dmg / (1 << y)
 
 #define DEBUF_DURATION(ra) 20 * (RARE_MAX - ra) / RARE_MAX
@@ -251,6 +255,22 @@ stat_element(caster_t *caster, register unsigned char mask)
 	return ((spell_skeleton_t *) &skel.data)->element;
 }
 
+static void mcp_mp(unsigned ent_ref);
+static void mcp_spells(unsigned ent_ref);
+
+/* Server -> client cast acknowledgement (ND_BCP_SPELL_CAST, opcode 17):
+ * u8 slot, u8 element, u32 target_ref. Lets any viewport react (HUD, TTY
+ * line, particle effects) without parsing combat text. */
+static void
+mcp_cast_ack(unsigned ent_ref, unsigned slot, unsigned element, unsigned target_ref)
+{
+	unsigned char buf[6];
+	buf[0] = (unsigned char) slot;
+	buf[1] = (unsigned char) element;
+	memcpy(buf + 2, &target_ref, sizeof(target_ref));
+	fbcp(ent_ref, sizeof(buf), 17, buf);
+}
+
 static inline int
 spell_cast(unsigned ent_ref, unsigned target_ref, unsigned slot)
 {
@@ -259,8 +279,13 @@ spell_cast(unsigned ent_ref, unsigned target_ref, unsigned slot)
 	hit_t hit = { .ndmg = 0, };
 	SKEL skel;
 
+	if (slot >= 8)
+		return -1;
+	caster_ensure(ent_ref);
 	nd_get(caster_hd, &caster, &ent_ref);
 	sp = caster.spells[slot];
+	if (!sp.skel)
+		return -1;
 
 	nd_get(HD_SKEL, &skel, &sp.skel);
 	spell_skeleton_t *sspe = (spell_skeleton_t *) &skel.data;
@@ -302,6 +327,9 @@ spell_cast(unsigned ent_ref, unsigned target_ref, unsigned slot)
 	if (ret && random() < (RAND_MAX >> sspe->y))
 		debuf_start(target_ref, &sp, hit.cdmg);
 
+	mcp_cast_ack(ent_ref, slot, sspe->element, target_ref);
+	mcp_spells(ent_ref); /* costs/cooldowns may have changed */
+	mcp_mp(ent_ref);
 	return 0;
 }
 
@@ -419,6 +447,51 @@ debufs_process(unsigned ent_ref)
 	return hpi;
 }
 
+static void mcp_spells(unsigned ent_ref)
+{
+	/* Wire layout mirrors nd/spell-bcp.h (ND_BCP_SPELL_LIST = 16):
+	 * u8 count, then count packed slot records. fbcp prepends '#b' + iden. */
+#pragma pack(push, 1)
+	struct {
+		unsigned char slot_id;
+		uint32_t spell_skel;
+		unsigned short cost;
+		unsigned char element;
+		unsigned char cooldown;
+		char name[24];
+	} slots[8];
+#pragma pack(pop)
+	unsigned char buf[1 + sizeof(slots)];
+	caster_t caster;
+	unsigned count = 0;
+
+	memset(slots, 0, sizeof(slots));
+	if (nd_get(caster_hd, &caster, &ent_ref))
+		return;
+
+	for (unsigned j = 0; j < 8; j++) {
+		struct spell *sp = &caster.spells[j];
+		SKEL skel;
+		unsigned sref = sp->skel;
+
+		if (!sref || sref == NOTHING || nd_get(HD_SKEL, &skel, &sref))
+			continue;
+
+		spell_skeleton_t *sspe = (spell_skeleton_t *) &skel.data;
+		slots[count].slot_id = (unsigned char) j;
+		slots[count].spell_skel = sref;
+		slots[count].cost = (unsigned short) sp->cost;
+		slots[count].element = (unsigned char) sspe->element;
+		slots[count].cooldown = 0;
+		snprintf(slots[count].name, sizeof(slots[count].name), "%.23s", skel.name);
+		count++;
+	}
+
+	buf[0] = (unsigned char) count;
+	memcpy(buf + 1, slots, count * sizeof(slots[0]));
+	fbcp(ent_ref, 1 + count * sizeof(slots[0]), 16, buf);
+}
+
 static void mcp_mp(unsigned ent_ref) {
 	caster_t caster;
 
@@ -457,15 +530,15 @@ XY_IMPL(int, on_mortal_survival, unsigned, ent_ref, double, dt)
 	return 0;
 }
 
-XY_IMPL(int, on_add, unsigned, ref, unsigned, type, uint64_t, v)
+/* Build a fresh caster for `ref` from the declarative spell table. Used when
+ * the entity is added, and lazily for a player whose caster was never
+ * created (for instance a character created in another region). */
+static void
+caster_create(unsigned ref)
 {
 	register int j;
 	caster_t caster;
 	memset(&caster, 0, sizeof(caster));
-
-	(void) v;
-	if (type != TYPE_ENTITY)
-		return 1;
 
 	caster.mp = mp_max(ref);
 
@@ -474,15 +547,43 @@ XY_IMPL(int, on_add, unsigned, ref, unsigned, type, uint64_t, v)
 	for (j = 0; j < 8; j++) {
 		struct spell *sp = &caster.spells[j];
 		SKEL skel;
-		unsigned ref = HEAL_SKEL_REF;
-		nd_get(HD_SKEL, &skel, &ref);
+		/* Slot j holds the j-th spell of the declarative table; slots
+		 * beyond the table stay empty (skel 0). */
+		unsigned sref = (unsigned) j < spell_loaded ? spell_skel_ref[j] : 0;
+		caster.debufs[j].skel = NOTHING;
+		if ((unsigned) j >= spell_loaded || nd_get(HD_SKEL, &skel, &sref))
+			continue;
 		spell_skeleton_t *sspe = (spell_skeleton_t *) &skel.data;
+		sp->skel = sref;
 		sp->val = mdmg + G(sspe->ms) * (sspe->ra + 1) / RARE_MAX;
 		sp->cost = SPELL_COST(sp->val, sspe->y, sspe->flags & AF_BUF);
-		caster.debufs[j].skel = NOTHING;
 	}
 
 	nd_put(caster_hd, &ref, &caster);
+}
+
+static void
+caster_ensure(unsigned ref)
+{
+	caster_t probe;
+	if (nd_get(caster_hd, &probe, &ref))
+		caster_create(ref);
+}
+
+XY_IMPL(int, on_add, unsigned, ref, unsigned, type, uint64_t, v)
+{
+	(void) v;
+	if (type != TYPE_ENTITY)
+		return 1;
+	caster_create(ref);
+	return 0;
+}
+
+XY_IMPL(int, on_auth, unsigned, player_ref)
+{
+	caster_ensure(player_ref);
+	mcp_spells(player_ref);
+	mcp_mp(player_ref);
 	return 0;
 }
 
@@ -583,6 +684,88 @@ do_heal(int fd, int argc __attribute__((unused)), char *argv[])
 	}
 }
 
+/* --- declarative spell table (spells.dsv) ---------------------------- */
+
+typedef struct { const char *n; unsigned v; } spell_tok_t;
+
+static unsigned
+spell_token(const char *tok, size_t len, const spell_tok_t *tab, size_t cnt)
+{
+	for (size_t i = 0; i < cnt; i++)
+		if (strlen(tab[i].n) == len && !strncmp(tab[i].n, tok, len))
+			return tab[i].v;
+	return 0;
+}
+
+static unsigned
+spell_flags(const char *list)
+{
+	static const spell_tok_t tab[] = {
+		{ "hp", AF_HP }, { "mov", AF_MOV }, { "mdmg", AF_MDMG },
+		{ "mdef", AF_MDEF }, { "dodge", AF_DODGE }, { "dmg", AF_DMG },
+		{ "def", AF_DEF }, { "neg", AF_NEG }, { "buf", AF_BUF },
+	};
+	unsigned out = 0;
+	while (*list) {
+		size_t len = strcspn(list, "+");
+		out |= spell_token(list, len, tab, sizeof(tab) / sizeof(tab[0]));
+		list += len + (list[len] == '+');
+	}
+	return out;
+}
+
+static int
+spell_row(const char *const *f, size_t n, void *user)
+{
+	static const spell_tok_t elm[] = {
+		{ "spirit", ELM_SPIRIT }, { "fire", ELM_FIRE }, { "water", ELM_WATER },
+		{ "air", ELM_AIR }, { "earth", ELM_EARTH }, { "physical", ELM_PHYSICAL },
+	};
+	(void)user;
+	if (n < 6)
+		return 0;
+	unsigned skid = spell_new((char *)f[0], spell_token(f[1], strlen(f[1]), elm, sizeof(elm) / sizeof(elm[0])),
+			(unsigned char)atoi(f[2]), (unsigned char)atoi(f[3]),
+			(unsigned char)atoi(f[4]), (unsigned char)spell_flags(f[5]));
+	if (spell_loaded < sizeof(spell_skel_ref) / sizeof(spell_skel_ref[0]))
+		spell_skel_ref[spell_loaded++] = skid;
+	return 0;
+}
+
+/* `spells`: plain-text grimoire for any viewport (TTY included). */
+static void
+do_spells(int fd, int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
+{
+	unsigned player_ref = fd_player(fd);
+	static const char *const el[] = { "-", "spirit", "fire", "-", "water", "-", "-", "-",
+		"air" };
+	caster_t caster;
+	unsigned shown = 0;
+
+	caster_ensure(player_ref);
+	if (nd_get(caster_hd, &caster, &player_ref))
+		return;
+	nd_printf(player_ref, "Slot Spell            Cost Element   (MP %ld)\n", caster.mp);
+	for (unsigned j = 0; j < 8; j++) {
+		struct spell *sp = &caster.spells[j];
+		SKEL skel;
+		unsigned sref = sp->skel;
+		spell_skeleton_t *sspe;
+		const char *en;
+
+		if (!sref || sref == NOTHING || nd_get(HD_SKEL, &skel, &sref))
+			continue;
+		sspe = (spell_skeleton_t *) &skel.data;
+		en = sspe->element == ELM_EARTH ? "earth"
+			: sspe->element == ELM_PHYSICAL ? "physical"
+			: sspe->element < 9 && el[sspe->element] ? el[sspe->element] : "-";
+		nd_printf(player_ref, "%4u %-16s %4u %s\n", j, skel.name, sp->cost, en);
+		shown++;
+	}
+	if (!shown)
+		nd_printf(player_ref, "Your grimoire is empty.\n");
+}
+
 XY_IMPL(int, on_vim, unsigned, ent_ref, sic_str_t, ss)
 {
 	char *opcs = ss.str + ss.pos;
@@ -624,17 +807,9 @@ xy_install(void)
 	bcp_mp = (unsigned)nd_put(HD_BCP, NULL, "mp");
 
 	nd_register("heal", do_heal, 0);
+	nd_register("spells", do_spells, 0);
 	nd_get(HD_RWTS, &wt_heal, "hit");
 
-	spell_new("Heal", ELM_PHYSICAL, 3, 1, 2, AF_HP);
-	spell_new("Focus", ELM_PHYSICAL, 15,3, 1, AF_MDMG | AF_BUF);
-	spell_new("Fire Focus", ELM_FIRE, 15,3, 1, AF_MDMG | AF_BUF);
-	spell_new("Cut", ELM_PHYSICAL, 15,1, 2, AF_NEG);
-	spell_new("Fireball", ELM_FIRE, 3, 1, 2, AF_NEG);
-	spell_new("Weaken", ELM_PHYSICAL, 15,3, 1, AF_MDMG | AF_BUF | AF_NEG);
-	spell_new("Distract", ELM_PHYSICAL, 15, 3, 1, AF_MDEF | AF_BUF | AF_NEG);
-	spell_new("Freeze", ELM_WATER, 10, 2, 4, AF_MOV | AF_NEG);
-	spell_new("Lava Shield", ELM_FIRE, 15, 3, 1, AF_MDEF | AF_BUF);
-	spell_new("Wind Veil", ELM_AIR, 0, 0, 0, AF_DODGE);
-	spell_new("Stone Skin", ELM_EARTH, 0, 0, 0, AF_DEF);
+	if (nd_table_load("nd-spell", "spells", spell_row, NULL) < 0)
+		WARN("nd-spell: spells.dsv not found, no spells loaded\n");
 }

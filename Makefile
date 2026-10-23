@@ -1,6 +1,6 @@
 all := libnd-spell
 
-LDLIBS-libnd-spell := -lxylem -lm
+LDLIBS-libnd-spell := -lxylem -lm -laxil-nd
 
 FOLDER := nd
 
