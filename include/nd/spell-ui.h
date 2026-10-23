@@ -17,6 +17,31 @@
 extern "C" {
 #endif
 
+static inline int
+on_spell_modal_close(bud_event *ev)
+{
+	if (ev && ev->target) {
+		const char *id = bud_get_attr(ev->target, "id");
+		if (id && strcmp(id, "spell-modal") != 0) {
+			const char *cls = bud_get_attr(ev->target, "class");
+			if (!cls || !strstr(cls, "hover:text-neutral-100"))
+				return 0;
+		}
+	}
+	nd_ui_set_active_modal("");
+#ifdef __wasm__
+	bud_app_set_state();
+#endif
+	return 0;
+}
+
+static inline int
+on_spell_card_click(bud_event *ev)
+{
+	if (ev) bud_event_stop_propagation(ev);
+	return 1;
+}
+
 static inline bud_node *
 nd_spell_render_modal(const void *state)
 {
@@ -32,9 +57,11 @@ nd_spell_render_modal(const void *state)
 	bud_node *overlay = bud_element("div");
 	bud_set_attr(overlay, "id", "spell-modal");
 	bud_set_attr(overlay, "class", "fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4");
+	bud_bind(overlay, "click", 0, on_spell_modal_close);
 
 	bud_node *card = bud_element("div");
 	bud_set_attr(card, "class", "bg-neutral-900 border border-neutral-700 rounded-lg p-6 max-w-md w-full flex flex-col gap-4 shadow-xl");
+	bud_bind(card, "click", 1, on_spell_card_click);
 
 	bud_node *header = bud_element("div");
 	bud_set_attr(header, "class", "flex justify-between items-center border-b border-neutral-800 pb-2");
@@ -47,6 +74,7 @@ nd_spell_render_modal(const void *state)
 	bud_set_attr(close_btn, "type", "button");
 	bud_set_attr(close_btn, "class", "text-neutral-400 hover:text-neutral-100 text-sm");
 	bud_append(close_btn, bud_text("✕"));
+	bud_bind(close_btn, "click", 0, on_spell_modal_close);
 	bud_append(header, close_btn);
 
 	bud_append(card, header);
