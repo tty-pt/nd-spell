@@ -6,7 +6,7 @@
 #include <bud/bud.h>
 #include <bud/bud_app.h>
 #include <nd/ui-slot-types.h>
-#include "nd_scene.h"
+#include <nd/scene.h>
 #include <nd/bcp-types.h>
 #include <nd/bcp-meta.h>
 #include <nd/spell-bcp.h>
