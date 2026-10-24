@@ -1,4 +1,19 @@
-## 1.0.7
+## [1.1.0]
+
+- **Spellbook Grimoire Modal (`ux/spell_ui.c`, `<nd/spell-ui.h>`)**:
+  - Implemented `nd_spell_render_modal()` rendering interactive spellbook overlay card with live MP cost checks and cast triggers.
+  - Adopted universal `BUD_DEFINE_STATE` and `BUD_SLOT_CONTRIBUTE` for grimoire spellbook slot contribution.
+- **Declarative BCP Protocol Integration (`<nd/spell-bcp.h>`)**:
+  - Added declarative BCP unpackers for `ND_BCP_SPELL_LIST` and `ND_BCP_SPELL_CAST` wire messages into `nd_spellbook_state_t`.
+- **Declarative DSV Table (`data/spells.dsv`)**:
+  - Exported 11 core incantations into declarative `data/spells.dsv` table.
+  - Refactored `src/libnd-spell.c` to load spell definitions dynamically via `nd_table_load()`.
+- **Two-Header Architecture (`<nd/spell-types.h>`, `<nd/spell.h>`)**:
+  - Extracted public types header `<nd/spell-types.h>` and caller header `<nd/spell.h>`.
+- **Documentation**:
+  - Standardized README with man-src, art, and modder guide.
+
+## [1.0.7]
 
 - **`do_heal`'s dead `EF_WIZARD` gate is gone, with the behaviour it already
   had.** Nothing ever set `EF_WIZARD` — the flag was deleted with the wizard
