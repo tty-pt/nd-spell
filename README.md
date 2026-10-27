@@ -63,6 +63,18 @@ same command works either way. CI names the deps explicitly
   `on_death` bodies cover recovery and killing; `on_add`, `on_status` and
   `on_vim` cover creation, display and targeting.
 
+## In-Game Commands (`man-src/`)
+
+| Command | Section | Description |
+|---------|---------|-------------|
+| `cast` | 10 | Cast an offensive, defensive, or utility spell |
+| `heal` | 10 | Channel magical restoration to an ally or self |
+
+## Wire Protocol & BCP Integration
+
+- Registers `bcp_mp` dynamically on `HD_BCP`.
+- Transmits real-time Mana points and max mana gauge updates via `mcp_bar(bcp_mp, player, mp, max)`.
+
 ## Testing
 
 There is no `test.sh` here. Behaviour is asserted by the engine's own suite:
