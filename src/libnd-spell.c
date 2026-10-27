@@ -625,9 +625,12 @@ XY_IMPL(int, on_mortal_life, unsigned, ent_ref, double, dt)
 
 XY_IMPL(int, on_status, unsigned, ent_ref)
 {
-	caster_t caster;
+	caster_t caster = { 0 };
 
-	nd_get(caster_hd, &caster, &ent_ref);
+	if (nd_get(caster_hd, &caster, &ent_ref) != 0) {
+		caster.mp = mp_max(ent_ref);
+		nd_put(caster_hd, &ent_ref, &caster);
+	}
 
 	nd_printf(ent_ref, "Spell\tmp %5u, mmp %4u, com %4x, dem %4x\n",
 		caster.mp, mp_max(ent_ref),
