@@ -21,11 +21,9 @@ extern "C" {
 static inline int
 on_spell_modal_close(bud_event *ev)
 {
-	(void)ev;
+	if (ev) bud_event_stop_propagation(ev);
 	nd_ui_set_active_modal("");
-#ifdef __wasm__
 	bud_app_set_state();
-#endif
 	return 0;
 }
 
