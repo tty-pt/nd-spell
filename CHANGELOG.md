@@ -1,6 +1,7 @@
 ## [Unreleased] (target: v1.0.9)
 
 ### Changed
+- Removed `#ifdef __wasm__` guard around `bud_app_set_state()` and added `bud_event_stop_propagation()` in `on_spell_modal_close()` (`include/nd/spell-ui.h`) to enable native client UI state updates alongside WASM.
 - Refactored stllog logging comments, removed add-prefix paths, and cleaned dependencies.
 
 ## [1.0.8]
